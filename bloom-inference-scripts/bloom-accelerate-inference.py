@@ -49,8 +49,8 @@ print_rank0(f"Loading model {model_name}")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 # XXX: can't automatically derive dtype via config's `from_pretrained`
-dtype = torch.bfloat16 if model_name in ["bigscience/bloom", "bigscience/bigscience-small-testing"] else torch.float16
-
+#dtype = torch.bfloat16 if model_name in ["bigscience/bloom", "bigscience/bigscience-small-testing"] else torch.float16
+dtype=torch.float16
 # print(get_max_memory_per_gpu_dict())
 
 infer_dtype = args.dtype
@@ -116,20 +116,32 @@ inputs = input_sentences[: args.batch_size]
 
 
 def generate():
-    """returns a list of zipped inputs, outputs and number of new tokens"""
+    """returns a list of zipped inputs, outputs and number of new tokens, and prints timing for each operation"""
 
+    timings = {}
+
+    t0 = time.time()
     input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
+    timings["tokenize"] = time.time() - t0
+
+    t1 = time.time()
     for t in input_tokens:
         if torch.is_tensor(input_tokens[t]):
-            input_tokens[t] = input_tokens[t].to("cuda:0")
+            input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
+    timings["to_cuda"] = time.time() - t1
 
+    t2 = time.time()
     outputs = model.generate(**input_tokens, **generate_kwargs)
+    timings["generate"] = time.time() - t2
 
+    t3 = time.time()
     input_tokens_lengths = [x.shape[0] for x in input_tokens.input_ids]
     output_tokens_lengths = [x.shape[0] for x in outputs]
-
     total_new_tokens = [o - i for i, o in zip(input_tokens_lengths, output_tokens_lengths)]
     outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    timings["postprocess"] = time.time() - t3
+
+    print_rank0(timings)
 
     return zip(inputs, outputs, total_new_tokens)
 
