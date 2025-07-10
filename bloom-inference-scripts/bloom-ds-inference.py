@@ -118,14 +118,14 @@ config = AutoConfig.from_pretrained(model_name)
 # use one of these args to `init_inference`
 # 1. injection_policy is the slower version, but it's plain pytorch so it'll always work
 # 2. replace_with_kernel_inject is the faster one (fast fused kernels)
-kernel_inject = True
-# kernel_inject = False
+# kernel_inject = True
+kernel_inject = False
 
 if kernel_inject:
     # XXX: for now ds-inference only works with fp16
     dtype = torch.float16
 else:
-    dtype = torch.bfloat16
+    dtype = torch.float16
 
 if args.benchmark:
     torch.cuda.empty_cache()
@@ -134,7 +134,7 @@ if args.benchmark:
 
 # Construct model with fake meta tensors, later will be replaced during ds-inference ckpt load
 with deepspeed.OnDevice(dtype=dtype, device="meta"):
-    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.bfloat16)
+    model = AutoModelForCausalLM.from_config(config, torch_dtype=torch.float16)
 
 if args.benchmark:
     deepspeed.runtime.utils.see_memory_usage("post-from-pretrained", force=True)
@@ -228,28 +228,39 @@ inputs = input_sentences[: args.batch_size]
 
 
 def generate():
-    """returns a list of zipped inputs, outputs and number of new tokens"""
+    """returns a list of zipped inputs, outputs and number of new tokens, and prints timing for each operation"""
 
+    timings = {}
+
+    t0 = time.time()
     input_tokens = tokenizer.batch_encode_plus(inputs, return_tensors="pt", padding=True)
+    timings["tokenize"] = time.time() - t0
+
+    t1 = time.time()
     for t in input_tokens:
         if torch.is_tensor(input_tokens[t]):
             input_tokens[t] = input_tokens[t].to(torch.cuda.current_device())
+    timings["to_cuda"] = time.time() - t1
 
+    t2 = time.time()
     outputs = model.generate(**input_tokens, **generate_kwargs)
+    timings["generate"] = time.time() - t2
 
+    t3 = time.time()
     input_tokens_lengths = [x.shape[0] for x in input_tokens.input_ids]
     output_tokens_lengths = [x.shape[0] for x in outputs]
-
     total_new_tokens = [o - i for i, o in zip(input_tokens_lengths, output_tokens_lengths)]
     outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)
+    timings["postprocess"] = time.time() - t3
+
+    print_rank0(timings)
 
     return zip(inputs, outputs, total_new_tokens)
 
-
 # warmup is a must if measuring speed as it's when all the optimizations are performed
 # e.g. on 8x80 a100 the first pass of 100 tokens takes 23sec, and the next one is 4secs
-print_rank0("*** Running generate warmup")
-_ = generate()
+# print_rank0("*** Running generate warmup")
+# _ = generate()
 
 print_rank0("*** Running generate")
 t_generate_start = time.time()
